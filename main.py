@@ -4,6 +4,8 @@ from config import mysql
 from flask import jsonify
 from flask import flash, request
 
+pdf_creation_file_name = "request.pdf"
+
 
 @app.route('/products')
 def product():
@@ -154,8 +156,8 @@ def doRequest():
         telephone = request.args.get("telephone", default='', type=str)
         additional = request.args.get("additional", default='', type=str)
         # get product informations
-        idsJson = request.args.get("productids", default='[]', type=str)
-        ids = idsJson.replace("[", "(")
+        idsJsonStr = request.args.get("productids", default='[]', type=str)
+        ids = idsJsonStr.replace("[", "(")
         ids = ids.replace("]", ")")
         print(ids)
         conn = mysql.connect()
@@ -167,29 +169,40 @@ def doRequest():
         """ + ids)
         products = cursor.fetchall()
 
-        body = f"""New Request from {lastname},{firstname} ({company})
+        body = f"""New Request from {lastname},{firstname} (<b>{company}</b>)
         Contact data:
-         - {email}
-         - {telephone}
+         - <i>{email}</i>
+         - <i>{telephone}</i>
 
-        additional Information:
+        <b>additional Information:</b>
         {additional}
 
-        productIds:
+        <b>PartNumbers</b>
         {ids}
         """
-        idsJson = json.loads(idsJson)
-        for product in products:
-            artikelnummer = product["Artikelnummer"].encode('ascii', 'ignore').decode('ascii')
-            bezeichnung = product["Bezeichnung"].encode('ascii', 'ignore').decode('ascii')
-            beschreibung = product["Beschreibung"].encode('ascii', 'ignore').decode('ascii')
-            countp = len(list(filter(lambda x: str(x) == str(artikelnummer), idsJson)))
-            body += f"""
-({artikelnummer}){bezeichnung} ---- {countp}
-{beschreibung}
+        idsJson = json.loads(idsJsonStr)
+#         for product in products:
+#             artikelnummer = product["Artikelnummer"].encode('ascii', 'ignore').decode('ascii')
+#             bezeichnung = product["Bezeichnung"].encode('ascii', 'ignore').decode('ascii')
+#             beschreibung = product["Beschreibung"].encode('ascii', 'ignore').decode('ascii')
+#             countp = len(list(filter(lambda x: str(x) == str(artikelnummer), idsJson)))
+#             body += f"""
+# ({artikelnummer}){bezeichnung} ---- {countp}
+# {beschreibung}
 
-            """
-        # body = body.replace("\n", "<br>")
+#             """
+        cursor.execute("""INSERT INTO web_catalog_request
+           (firstname,lastname,company,email,telephone,additional,products) VALUES(%s,%s,%s,%s,%s,%s,%s)
+        """, (firstname, lastname, company, email, telephone, additional, idsJsonStr))
+        conn.commit()
+        insertedId = cursor.lastrowid
+        wcString = str(insertedId)
+        wcString = wcString.rjust(6, '0')
+        wcString = "WC"+wcString
+        subject += "  " + wcString
+
+        create_pdf_file(lastname, firstname, company, email, telephone, additional, idsJson, products, wcString)
+        body = body.replace("\n", "<br>")
         if(send_email(sender, pw, receiver, subject, body)):
             msg = {
                 'status': 200,
@@ -224,6 +237,12 @@ def not_found(error=None):
 
 def send_email(user, pwd, recipient, subject, body):
     import smtplib
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
+    from email.mime.application import MIMEApplication
+    from os.path import basename
+    import email
+    import email.mime.application
 
     FROM = user
     TO = recipient if isinstance(recipient, list) else [recipient]
@@ -231,14 +250,30 @@ def send_email(user, pwd, recipient, subject, body):
     TEXT = body
 
     # Prepare actual message
-    message = """From: %s\nTo: %s\nSubject: %s\n\n%s
-    """ % (FROM, ", ".join(TO), SUBJECT, TEXT)
+    # message = """From: %s\nTo: %s\nSubject: %s\n\n%s
+    # """ % (FROM, ", ".join(TO), SUBJECT, TEXT)
     try:
         server = smtplib.SMTP("smtp.gmail.com", 587)
         server.ehlo()
         server.starttls()
         server.login(user, pwd)
-        server.sendmail(FROM, TO, message)
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = subject
+        msg['From'] = FROM
+        msg['To'] = ", ".join(TO)
+
+        # The MIME types for text/html
+        HTML_Contents = MIMEText(body, 'html')
+
+        # Adding pptx file attachment
+        path_to_pdf = pdf_creation_file_name
+        with open(path_to_pdf, "rb") as f:
+            # attach = email.mime.application.MIMEApplication(f.read(),_subtype="pdf")
+            attach = MIMEApplication(f.read(), _subtype="pdf")
+            attach.add_header('Content-Disposition', 'attachment', filename=str(path_to_pdf))
+            msg.attach(attach)
+        msg.attach(HTML_Contents)
+        server.sendmail(FROM, TO, msg.as_string())
         server.close()
         print('successfully sent the mail')
         return True
@@ -247,6 +282,93 @@ def send_email(user, pwd, recipient, subject, body):
         print(e)
 
     return False
+
+
+def create_pdf_file(lastname, firstname, company, email, telephone, additional, idsJson, products, wcString):
+    import pdfkit
+
+    config = pdfkit.configuration(wkhtmltopdf=r"D:\Tools\wkhtmltox\bin\wkhtmltopdf.exe")
+    # imgPath = "file:///D:/Development/thenex_webcatalog/thenex_webcatalog/assets/images/thenex_logo.png"
+    imgPath = "https://thenex.com/wp-content/uploads/2015/09/Thenex_Logo_2015_AVADA_350_Transparent.png"
+    additional = additional.replace("\n", "<br>")
+    s = f"""<!DOCTYPE html>
+            <html>
+            <head>
+            <style>
+            *{{
+                font-family:'Arial';
+            }}
+            .img_container{{
+               text-align: right;
+            }}
+            table{{
+                border-collapse:collapse;
+            }}
+            table tr:nth-child(even) td{{
+                padding-top:5px;
+                padding-bottom:5px;
+
+
+            }}
+            table tr th{{
+                text-align:left;
+                border-bottom: 2px solid black !important;
+            }}
+            table tr:nth-child(odd) td{{
+                border-bottom:1px solid grey;
+            }}
+            </style>
+            </head>
+            <body>
+            <div class='img_container'>
+            <img src='{imgPath}' height=100>
+            </div>
+            <p>thenex GmbH - Robert-Bosch-Str. 42 - 46397 Bocholt (Germany)</p>
+            <p>
+                {company}<br>
+                {firstname} {lastname}<br>
+                {email}<br>
+                Tel. {telephone}
+            </p>
+            <h2>{wcString}</h2>
+            <h3>additional Information:</h3>
+            {additional}
+            <br><br>
+            <table>
+            <tr>
+            <th>Pos</th>
+            <th>PartNo.</th>
+            <th>Description</th>
+            <th>Qty</th>            
+            </tr>
+            """
+    for index, product in enumerate(products):
+        artikelnummer = product["Artikelnummer"].encode('ascii', 'ignore').decode('ascii')
+        bezeichnung = product["Bezeichnung"].encode('ascii', 'ignore').decode('ascii')
+        beschreibung = product["Beschreibung"].encode('ascii', 'ignore').decode('ascii')
+        countp = len(list(filter(lambda x: str(x) == str(artikelnummer), idsJson)))
+        s += f"""
+        <tr>
+            <td>{index}</td>
+            <td>{artikelnummer}</td>
+            <td></td>
+            <td>{countp}</td>
+        </tr>
+        <tr>
+            <td></td>
+            <td colspan='2'><b>{bezeichnung}</b><br>{beschreibung}</td>
+            <td></td>
+
+        </tr>
+            """
+    s += "</table>"
+
+    # s = """<h1><strong>Sample PDF file from HTML</strong></h1>
+    #     <br></br>
+    #     <p>First line...</p>
+    #     <p>Second line...</p>
+    #     <p>Third line...</p>"""
+    pdfkit.from_string(s, output_path=pdf_creation_file_name, configuration=config)
 
 
 if __name__ == "__main__":
